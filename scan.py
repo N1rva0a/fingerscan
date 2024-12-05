@@ -4,8 +4,16 @@ from bs4 import BeautifulSoup
 import argparse
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import random
 from finger import add_fingerprint  # Importing the function to add fingerprints
 from finger import fingerprints  # Importing the fingerprints list
+
+# List of user agents to choose from
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/76.0.3809.100 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/76.0.3809.100 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 6.1; WOW64; rv:54.0) Gecko/20100101 Firefox/68.0'
+]
 
 # Function to handle HTML entity decoding and case normalization
 def normalize_body(body):
@@ -22,8 +30,13 @@ def check_fingerprint(url, fingerprints, proxies=None, timeout=10, retries=3):
 
     while attempt < retries:
         try:
+            # Randomly select a user-agent
+            headers = {
+                'User-Agent': random.choice(USER_AGENTS)
+            }
+            
             # Make the request with a timeout, ignoring SSL certificate verification
-            response = requests.get(url, proxies=proxies, verify=False, timeout=timeout)
+            response = requests.get(url, headers=headers, proxies=proxies, verify=False, timeout=timeout)
             body = response.text
             
             # Normalize the body (decode HTML entities and make case-insensitive)
