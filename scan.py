@@ -27,91 +27,91 @@ def ensure_protocol(url):
         url = 'http://' + url
     return url
 
-# Function to evaluate if the URL matches any of the defined fingerprints
-def check_fingerprint(url, fingerprints, proxies=None, timeout=10, retries=3):
-    matched_fingerprints = []  # List to store matched fingerprints
+
+# Function to check fingerprint with retry mechanism
+def check_fingerprint_with_retry(url, fingerprints, proxies=None, timeout=10, retries=3):
     attempt = 0
-
-    url = ensure_protocol(url)  # Ensure protocol is added
-
+    backoff_time = 1  # Start with 1 second backoff time
     while attempt < retries:
         try:
-            headers = {'User-Agent': random.choice(USER_AGENTS)}  # Randomly select a user-agent
-            response = requests.get(url, headers=headers, proxies=proxies, verify=False, timeout=timeout)
-            body = response.text
-
-            normalized_body = normalize_body(body)
-            soup = BeautifulSoup(body, 'html.parser')
-            title = soup.title.string if soup.title else ''
-            title = title.strip().lower()  # Normalize the title
-            
-            x_powered_by = response.headers.get("X-Powered-By", "").lower()
-            user_agent = response.headers.get("User-Agent", "").lower()
-
-            # Iterate through the fingerprint rule sets
-            for fingerprint in fingerprints:
-                rules = fingerprint['rules']
-                matched = False
-                for rule in rules:
-                    if rule(normalized_body, title, x_powered_by, user_agent):
-                        matched = True
-                        break  # Stop once a rule matches
-
-                if matched:
-                    matched_fingerprints.append(fingerprint['name'])
-
-            return matched_fingerprints, url  # Return matched fingerprints and the URL with protocol
-
-        except requests.exceptions.RequestException as e:
-            print(f"Error fetching {url}: {e}")
+            matched_fingerprints, successful_url = check_fingerprint(url, fingerprints, proxies, timeout)
+            return matched_fingerprints, successful_url
+        except requests.exceptions.RequestException:
             attempt += 1
-            if attempt < retries:
-                print(f"Retrying... (Attempt {attempt}/{retries})")
-                time.sleep(3)
-            else:
-                print(f"Failed to fetch {url} after {retries} attempts.")
-    
-    return [], url  # Return an empty list if all attempts failed
+            print(f"Retrying {url} in {backoff_time:.2f}s (Attempt {attempt}/{retries})")
+            time.sleep(backoff_time)
+            backoff_time *= 2  # Exponentially increase backoff time (1s, 2s, 4s...)
+    return [], url  # Return empty if failed after retries
 
-# Function to handle URL batch processing from a file with multithreading
+# Function to check fingerprint for a given URL
+def check_fingerprint(url, fingerprints, proxies=None, timeout=10):
+    matched_fingerprints = []  # List to store matched fingerprints
+    url = ensure_protocol(url)  # Ensure protocol is added
+
+    try:
+        headers = {'User-Agent': random.choice(USER_AGENTS)}  # Randomly select a user-agent
+        response = requests.get(url, headers=headers, proxies=proxies, verify=False, timeout=timeout)
+        body = response.text
+
+        normalized_body = normalize_body(body)
+        soup = BeautifulSoup(body, 'html.parser')
+        title = soup.title.string if soup.title else ''
+        title = title.strip().lower()  # Normalize the title
+
+        x_powered_by = response.headers.get("X-Powered-By", "").lower()
+        user_agent = response.headers.get("User-Agent", "").lower()
+
+        # Iterate through the fingerprint rule sets
+        for fingerprint in fingerprints:
+            rules = fingerprint['rules']
+            matched = False
+            for rule in rules:
+                if rule(normalized_body, title, x_powered_by, user_agent):
+                    matched = True
+                    break  # Stop once a rule matches
+
+            if matched:
+                matched_fingerprints.append(fingerprint['name'])
+
+        return matched_fingerprints, url  # Return matched fingerprints and the URL with protocol
+
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching {url}: {e}")
+        raise  # Raise exception to trigger retry mechanism
+
+# Function to handle URL batch processing with real-time file writing and terminal output in green
 def process_urls_from_file(filename, fingerprints, output_file, proxies=None, timeout=10, retries=3):
     try:
         with open(filename, 'r') as file:
             urls = file.readlines()
-        
-        matched_results = []
 
         with ThreadPoolExecutor(max_workers=10) as executor:
             future_to_url = {
-                executor.submit(check_fingerprint, url.strip(), fingerprints, proxies, timeout, retries): url.strip()
+                executor.submit(check_fingerprint_with_retry, url.strip(), fingerprints, proxies, timeout, retries): url.strip()
                 for url in urls
             }
 
-            for future in as_completed(future_to_url):
-                url = future_to_url[future]
-                try:
-                    matched_fingerprints, successful_url = future.result()
-                    if matched_fingerprints:
-                        matched_results.append(f"{successful_url}, {', '.join(matched_fingerprints)}\n")
-
-                    if not matched_fingerprints and successful_url.startswith('https://'):
-                        # Retry with http:// if https:// fails
-                        http_url = successful_url.replace('https://', 'http://')
-                        print(f"Trying {http_url} instead...")
-                        matched_fingerprints, successful_url = check_fingerprint(http_url, fingerprints, proxies, timeout, retries)
+            # Open the output file in append mode for real-time writing
+            with open(output_file, 'a') as output:  # Open in 'append' mode to avoid overwriting
+                for future in as_completed(future_to_url):
+                    url = future_to_url[future]
+                    try:
+                        matched_fingerprints, successful_url = future.result()
                         if matched_fingerprints:
-                            matched_results.append(f"{successful_url}, {', '.join(matched_fingerprints)}\n")
+                            # Format the result
+                            result = f"{successful_url}, {', '.join(matched_fingerprints)}"
+                            
+                            # Output the result to the terminal in green
+                            print(f"\033[92mMatched: {result}\033[0m")
+                            
+                            # Write the result to the output file immediately
+                            output.write(result + '\n')
+                            output.flush()  # Ensure the result is written immediately to the file
 
-                except Exception as e:
-                    print(f"Error processing {url}: {e}")
-        
-        if matched_results:
-            with open(output_file, 'w') as output:
-                output.writelines(matched_results)
-            print(f"Results written to {output_file}")
-        else:
-            print("No matches found.")
-    
+                    except Exception as e:
+                        print(f"Error processing {url}: {e}")
+
+        print("Batch processing complete.")
     except FileNotFoundError:
         print(f"Error: The file {filename} was not found.")
     except Exception as e:
@@ -134,6 +134,7 @@ def ensure_protocol(url):
         url = 'http://' + url
     return url
 
+
 # Main function to parse arguments and run batch scanning
 def main():
     parser = argparse.ArgumentParser(description="Batch scan URLs and detect fingerprints.")
@@ -147,8 +148,6 @@ def main():
     
     args = parser.parse_args()
 
-    global fingerprints
-
     proxies = get_proxies(http_proxy=args.http_proxy, socks5_proxy=args.socks5_proxy)
 
     if args.output_file:
@@ -159,7 +158,7 @@ def main():
     if args.custom_url:
         print(f"Processing custom URL: {args.custom_url}")
         custom_url = ensure_protocol(args.custom_url)
-        matched_fingerprints, successful_url = check_fingerprint(custom_url, fingerprints, proxies, args.timeout, args.retries)
+        matched_fingerprints, successful_url = check_fingerprint_with_retry(custom_url, fingerprints, proxies, args.timeout, args.retries)
         if matched_fingerprints:
             print(f"Matched fingerprints: {', '.join(matched_fingerprints)}")
             if output_file:
