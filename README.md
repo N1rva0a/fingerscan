@@ -1,5 +1,5 @@
 -c specifies the target
--u know file
+-u Specify file
 -o output results
 Custom proxy access and delayed retries
 ![image](https://github.com/user-attachments/assets/926ecc20-46ca-4553-9bd7-d6580092c51c)
