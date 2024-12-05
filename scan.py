@@ -20,64 +20,58 @@ def normalize_body(body):
     body = unescape(body)  # Decode HTML entities (e.g., &amp; -> &)
     return body.lower()  # Convert to lowercase for case-insensitive matching
 
+# Function to ensure all URLs have a protocol (default to http:// if missing)
+def ensure_protocol(url):
+    # If URL doesn't already have a protocol (http:// or https://), prepend http://
+    if not url.startswith(('http://', 'https://')):
+        url = 'http://' + url
+    return url
+
 # Function to evaluate if the URL matches any of the defined fingerprints
 def check_fingerprint(url, fingerprints, proxies=None, timeout=10, retries=3):
     matched_fingerprints = []  # List to store matched fingerprints
     attempt = 0
-    
-    # Ensure the URL has a protocol
-    url = ensure_protocol(url)
+
+    url = ensure_protocol(url)  # Ensure protocol is added
 
     while attempt < retries:
         try:
-            # Randomly select a user-agent
-            headers = {
-                'User-Agent': random.choice(USER_AGENTS)
-            }
-            
-            # Make the request with a timeout, ignoring SSL certificate verification
+            headers = {'User-Agent': random.choice(USER_AGENTS)}  # Randomly select a user-agent
             response = requests.get(url, headers=headers, proxies=proxies, verify=False, timeout=timeout)
             body = response.text
-            
-            # Normalize the body (decode HTML entities and make case-insensitive)
+
             normalized_body = normalize_body(body)
-            
-            # Extract the title using BeautifulSoup for better handling of encoding and special characters
             soup = BeautifulSoup(body, 'html.parser')
             title = soup.title.string if soup.title else ''
             title = title.strip().lower()  # Normalize the title
             
-            # Extract headers
             x_powered_by = response.headers.get("X-Powered-By", "").lower()
             user_agent = response.headers.get("User-Agent", "").lower()
-            
+
             # Iterate through the fingerprint rule sets
             for fingerprint in fingerprints:
                 rules = fingerprint['rules']
                 matched = False
-                
-                # Check if any of the rules match
                 for rule in rules:
                     if rule(normalized_body, title, x_powered_by, user_agent):
                         matched = True
                         break  # Stop once a rule matches
-                
-                # If at least one rule matched, add the fingerprint to the list
+
                 if matched:
                     matched_fingerprints.append(fingerprint['name'])
-            
-            return matched_fingerprints  # Return immediately if the request was successful
-        
+
+            return matched_fingerprints, url  # Return matched fingerprints and the URL with protocol
+
         except requests.exceptions.RequestException as e:
             print(f"Error fetching {url}: {e}")
             attempt += 1
             if attempt < retries:
                 print(f"Retrying... (Attempt {attempt}/{retries})")
-                time.sleep(3)  # Wait 3 seconds before retrying
+                time.sleep(3)
             else:
                 print(f"Failed to fetch {url} after {retries} attempts.")
     
-    return []  # Return an empty list if all attempts failed
+    return [], url  # Return an empty list if all attempts failed
 
 # Function to handle URL batch processing from a file with multithreading
 def process_urls_from_file(filename, fingerprints, output_file, proxies=None, timeout=10, retries=3):
@@ -85,35 +79,32 @@ def process_urls_from_file(filename, fingerprints, output_file, proxies=None, ti
         with open(filename, 'r') as file:
             urls = file.readlines()
         
-        matched_results = []  # List to store matched results
-        
-        # Use ThreadPoolExecutor to scan URLs concurrently
+        matched_results = []
+
         with ThreadPoolExecutor(max_workers=10) as executor:
             future_to_url = {
                 executor.submit(check_fingerprint, url.strip(), fingerprints, proxies, timeout, retries): url.strip()
                 for url in urls
             }
 
-            # Process the results as they complete
             for future in as_completed(future_to_url):
                 url = future_to_url[future]
                 try:
-                    matched_fingerprints = future.result()
+                    matched_fingerprints, successful_url = future.result()
                     if matched_fingerprints:
-                        matched_results.append(f"{url}, {', '.join(matched_fingerprints)}\n")
+                        matched_results.append(f"{successful_url}, {', '.join(matched_fingerprints)}\n")
 
-                    # If HTTP is inaccessible, try HTTPS
-                    if not matched_fingerprints and url.startswith('http://'):
-                        https_url = url.replace('http://', 'https://')
-                        print(f"Trying {https_url} instead...")
-                        matched_fingerprints = check_fingerprint(https_url, fingerprints, proxies, timeout, retries)
+                    if not matched_fingerprints and successful_url.startswith('https://'):
+                        # Retry with http:// if https:// fails
+                        http_url = successful_url.replace('https://', 'http://')
+                        print(f"Trying {http_url} instead...")
+                        matched_fingerprints, successful_url = check_fingerprint(http_url, fingerprints, proxies, timeout, retries)
                         if matched_fingerprints:
-                            matched_results.append(f"{https_url}, {', '.join(matched_fingerprints)}\n")
+                            matched_results.append(f"{successful_url}, {', '.join(matched_fingerprints)}\n")
 
                 except Exception as e:
                     print(f"Error processing {url}: {e}")
         
-        # Write matched results to the output file
         if matched_results:
             with open(output_file, 'w') as output:
                 output.writelines(matched_results)
@@ -156,33 +147,28 @@ def main():
     
     args = parser.parse_args()
 
-    # Initialize the fingerprint library with the fingerprints list (already defined in fingerprint_manager.py)
     global fingerprints
 
-    # Get the proxy configuration if provided
     proxies = get_proxies(http_proxy=args.http_proxy, socks5_proxy=args.socks5_proxy)
 
-    # If an output file is specified, use it; otherwise, print results to console
     if args.output_file:
         output_file = args.output_file
     else:
         output_file = None
 
-    # If a custom URL is provided
     if args.custom_url:
         print(f"Processing custom URL: {args.custom_url}")
-        custom_url = ensure_protocol(args.custom_url)  # Ensure protocol is added
-        matched_fingerprints = check_fingerprint(custom_url, fingerprints, proxies, args.timeout, args.retries)
+        custom_url = ensure_protocol(args.custom_url)
+        matched_fingerprints, successful_url = check_fingerprint(custom_url, fingerprints, proxies, args.timeout, args.retries)
         if matched_fingerprints:
             print(f"Matched fingerprints: {', '.join(matched_fingerprints)}")
             if output_file:
                 with open(output_file, 'w') as output:
-                    output.write(f"{custom_url}, {', '.join(matched_fingerprints)}\n")
+                    output.write(f"{successful_url}, {', '.join(matched_fingerprints)}\n")
                     print(f"Results written to {output_file}")
         else:
             print("No matches found.")
     
-    # If a URL file is provided for batch scanning
     elif args.url_file:
         print(f"Processing URLs from file: {args.url_file}")
         if output_file:
@@ -190,7 +176,6 @@ def main():
         else:
             print("No output file specified, results will not be saved.")
     
-    # If no argument is provided
     else:
         print("Please specify either a custom URL or a URL file for batch scanning.")
 
